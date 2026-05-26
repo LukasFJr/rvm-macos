@@ -1,0 +1,840 @@
+import os
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+
+# Fix gradio_client 1.3.0 + pydantic v2: _json_schema_to_python_type() crashes when
+# additionalProperties is True (boolean). Wrap the function to return "Any" in that case.
+try:
+    import gradio_client.utils as _gcu
+    _orig_j2p = _gcu._json_schema_to_python_type
+
+    def _safe_j2p(schema, defs=None):
+        if not isinstance(schema, dict):
+            return "Any"
+        try:
+            return _orig_j2p(schema, defs)
+        except Exception:
+            return "Any"
+
+    _gcu._json_schema_to_python_type = _safe_j2p
+
+    _orig_get_type = _gcu.get_type
+    def _safe_get_type(schema):
+        if not isinstance(schema, dict):
+            return "unknown"
+        return _orig_get_type(schema)
+    _gcu.get_type = _safe_get_type
+except Exception:
+    pass
+
+import sys
+import threading
+import time
+import queue
+from pathlib import Path
+from typing import Optional
+
+import cv2
+import gradio as gr
+import numpy as np
+from PIL import Image
+
+from utils import (
+    detect_device, get_env_info, get_video_info, format_video_info_md,
+    open_in_finder, notify_macos, find_model_weights, download_weights,
+)
+
+# ---------------------------------------------------------------------------
+# CSS — system-aware light / dark theme, SF Pro, no hardcoded colours
+# ---------------------------------------------------------------------------
+
+CUSTOM_CSS = """
+/* ── Base font ────────────────────────────────────────────── */
+* {
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display',
+               'SF Pro Text', 'Helvetica Neue', sans-serif !important;
+}
+
+/* ── Light theme variables ────────────────────────────────── */
+:root {
+  --bg-primary:    #f5f5f7;
+  --bg-secondary:  #ffffff;
+  --bg-card:       #eeeeee;
+  --text-primary:  #1d1d1f;
+  --text-secondary:#6e6e73;
+  --accent:        #0071e3;
+  --accent-hover:  #0077ed;
+  --border:        #d2d2d7;
+  --success:       #34c759;
+  --warning:       #ff9f0a;
+  --error:         #ff3b30;
+  --radius:        12px;
+}
+
+/* ── Dark theme variables ─────────────────────────────────── */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg-primary:    #1c1c1e;
+    --bg-secondary:  #2c2c2e;
+    --bg-card:       #3a3a3c;
+    --text-primary:  #f5f5f7;
+    --text-secondary:#aeaeb2;
+    --accent:        #0a84ff;
+    --accent-hover:  #409cff;
+    --border:        #3a3a3c;
+    --success:       #30d158;
+    --warning:       #ffd60a;
+    --error:         #ff453a;
+  }
+}
+
+/* ── Global resets ────────────────────────────────────────── */
+.gradio-container {
+  background: var(--bg-primary) !important;
+  color: var(--text-primary) !important;
+  max-width: 960px !important;
+  margin: 0 auto !important;
+}
+
+/* Cards */
+.card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px 20px;
+  margin-bottom: 16px;
+}
+
+/* Section headings */
+.section-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 12px;
+}
+
+/* Status row */
+.status-ok   { color: var(--success); font-weight: 500; }
+.status-warn { color: var(--warning); font-weight: 500; }
+.status-err  { color: var(--error);   font-weight: 500; }
+
+/* Primary action button */
+.btn-primary button {
+  background: var(--accent) !important;
+  color: #fff !important;
+  border-radius: 8px !important;
+  font-size: 16px !important;
+  font-weight: 600 !important;
+  border: none !important;
+}
+.btn-primary button:hover {
+  background: var(--accent-hover) !important;
+}
+
+/* Danger / cancel button */
+.btn-danger button {
+  background: var(--error) !important;
+  color: #fff !important;
+  border-radius: 8px !important;
+  font-weight: 600 !important;
+  border: none !important;
+}
+
+/* Log textarea */
+.log-box textarea {
+  font-family: 'SF Mono', 'Menlo', monospace !important;
+  font-size: 12px !important;
+  background: var(--bg-card) !important;
+  color: var(--text-secondary) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 8px !important;
+}
+
+/* Labels */
+label span {
+  color: var(--text-primary) !important;
+  font-weight: 500 !important;
+}
+"""
+
+# ---------------------------------------------------------------------------
+# Globals shared between UI and inference thread
+# ---------------------------------------------------------------------------
+
+_cancel_event = threading.Event()
+_progress_queue: "queue.Queue[tuple]" = queue.Queue()
+_current_output_dir: Optional[Path] = None
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _make_checker_preview(w: int = 400, h: int = 225) -> np.ndarray:
+    cell = 20
+    img = np.zeros((h, w, 3), dtype=np.uint8)
+    for row in range(0, h, cell):
+        for col in range(0, w, cell):
+            v = 192 if ((row // cell) + (col // cell)) % 2 == 0 else 128
+            img[row:row+cell, col:col+cell] = v
+    return img
+
+BG_COLORS_UI = {
+    "Noir":   (0, 0, 0),
+    "Blanc":  (255, 255, 255),
+    "Vert chroma": (0, 177, 64),
+    "Damier": None,  # handled separately
+}
+BG_MAP = {
+    "Noir":  "black",
+    "Blanc": "white",
+    "Vert chroma": "green",
+    "Damier": "checker",
+}
+
+BACKBONE_MAP = {
+    "🚀 Rapide — MobileNetV3": "mobilenetv3",
+    "🎯 Qualité max — ResNet50": "resnet50",
+}
+
+RESOLUTION_MAP = {
+    "Auto (recommandé)": None,
+    "HD — 0.25": 0.25,
+    "4K — 0.125": 0.125,
+    "Manuel": "manual",
+}
+
+OUTPUT_FORMAT_MAP = {
+    "🎬 Vidéo (MP4)": "video",
+    "🖼️ Séquence PNG": "png",
+    "Les deux": "both",
+}
+
+OUTPUT_NAMES = {
+    "✅ Composition finale": "composite",
+    "Alpha mask seul":       "alpha",
+    "Foreground brut (RGB)": "foreground",
+}
+
+
+def _extract_preview_frames(video_path: str, bg_name: str) -> list:
+    """Extract 4 preview frames at 10/25/50/75% of the video."""
+    path = Path(video_path)
+    if not path.exists():
+        return [None, None, None, None]
+
+    cap = cv2.VideoCapture(str(path))
+    n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    positions = [int(n * p) for p in (0.10, 0.25, 0.50, 0.75)]
+    frames = []
+    for pos in positions:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, pos - 1))
+        ok, frame = cap.read()
+        if ok:
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            frames.append(rgb)
+        else:
+            h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 240
+            w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 320
+            frames.append(np.zeros((h, w, 3), dtype=np.uint8))
+    cap.release()
+
+    # Apply background tint for preview
+    result = []
+    for f in frames:
+        if bg_name == "Damier":
+            h, w = f.shape[:2]
+            result.append(_make_checker_preview(w, h))
+        else:
+            color = BG_COLORS_UI.get(bg_name, (0, 0, 0))
+            bg = np.full_like(f, color, dtype=np.uint8)
+            result.append(bg)
+    return result  # raw bg frames for "before" panel — source frames for source panel
+
+
+def _source_frames(video_path: str) -> list:
+    """Return 4 source frames."""
+    if not video_path or not Path(video_path).exists():
+        return [None] * 4
+    cap = cv2.VideoCapture(str(video_path))
+    n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    positions = [int(n * p) for p in (0.10, 0.25, 0.50, 0.75)]
+    out = []
+    for pos in positions:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, pos - 1))
+        ok, frame = cap.read()
+        out.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) if ok else None)
+    cap.release()
+    return out
+
+
+def _load_result_frames(output_dir: Path, stem: str, bg_name: str) -> list:
+    """Load composite frames from the output directory for preview."""
+    comp_video = output_dir / f"{stem}_composite.mp4"
+    comp_dir   = output_dir / f"{stem}_composite_png"
+
+    frames = []
+    if comp_video.exists():
+        cap = cv2.VideoCapture(str(comp_video))
+        n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        for p in (0.10, 0.25, 0.50, 0.75):
+            cap.set(cv2.CAP_PROP_POS_FRAMES, int(n * p))
+            ok, frame = cap.read()
+            frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) if ok else None)
+        cap.release()
+    elif comp_dir.exists():
+        pngs = sorted(comp_dir.glob("*.png"))
+        n = len(pngs)
+        for p in (0.10, 0.25, 0.50, 0.75):
+            idx = int(n * p)
+            if idx < n:
+                frames.append(np.array(Image.open(pngs[idx]).convert("RGB")))
+            else:
+                frames.append(None)
+    return frames if frames else [None, None, None, None]
+
+
+# ---------------------------------------------------------------------------
+# Build the Gradio interface
+# ---------------------------------------------------------------------------
+
+def build_interface():
+    with gr.Blocks(css=CUSTOM_CSS, theme=gr.themes.Base(), title="RVM — Détourage Vidéo") as demo:
+
+        # State
+        video_info_state   = gr.State({})
+        src_frames_state   = gr.State([None]*4)
+        result_frames_state = gr.State([None]*4)
+        preview_idx_state  = gr.State(0)
+
+        gr.Markdown("# RVM — Détourage Vidéo", elem_classes=["section-title"])
+        gr.Markdown("*Interface locale pour Robust Video Matting — macOS uniquement*")
+
+        # ── Section 1 : Environnement ────────────────────────────────────
+
+        with gr.Group(elem_classes=["card"]):
+            gr.Markdown("## 1 · Environnement", elem_classes=["section-title"])
+            env_md = gr.Markdown(get_env_info())
+
+            with gr.Row():
+                weights_status_md = gr.Markdown(_weights_status_text())
+                with gr.Column(scale=0, min_width=220):
+                    dl_backbone = gr.Radio(
+                        ["MobileNetV3", "ResNet50"],
+                        value="MobileNetV3",
+                        label="Poids à télécharger",
+                        visible=_any_weights_missing(),
+                    )
+                    dl_btn = gr.Button(
+                        "⬇️ Télécharger les poids",
+                        visible=_any_weights_missing(),
+                        variant="secondary",
+                    )
+            dl_progress = gr.Progress()
+            dl_status   = gr.Markdown("")
+
+        # ── Section 2 : Import vidéo ─────────────────────────────────────
+
+        with gr.Group(elem_classes=["card"]):
+            gr.Markdown("## 2 · Importer une vidéo", elem_classes=["section-title"])
+            video_input = gr.File(
+                label="Glissez votre vidéo ici ou cliquez pour parcourir",
+                file_types=[".mp4", ".mov", ".mkv", ".avi"],
+                type="filepath",
+            )
+            video_meta_md  = gr.Markdown("")
+            video_thumb    = gr.Image(label="Première frame", visible=False, height=180)
+
+        # ── Section 3 : Réglages ──────────────────────────────────────────
+
+        with gr.Group(elem_classes=["card"]):
+            gr.Markdown("## 3 · Réglages", elem_classes=["section-title"])
+
+            with gr.Row():
+                with gr.Column():
+                    backbone_radio = gr.Radio(
+                        list(BACKBONE_MAP.keys()),
+                        value="🚀 Rapide — MobileNetV3",
+                        label="Modèle",
+                        info="MobileNetV3 : rapide, très bon pour la majorité des cas. ResNet50 : contours plus fins, plus lent.",
+                    )
+
+                with gr.Column():
+                    resolution_radio = gr.Radio(
+                        list(RESOLUTION_MAP.keys()),
+                        value="Auto (recommandé)",
+                        label="Résolution de traitement",
+                        info="Auto s'adapte à la source. HD=0.25 pour 1080p, 4K=0.125 pour 4K.",
+                    )
+                    manual_ds = gr.Number(
+                        value=0.25,
+                        label="Ratio manuel (0.05 – 0.5)",
+                        minimum=0.05,
+                        maximum=0.5,
+                        step=0.05,
+                        visible=False,
+                    )
+
+            with gr.Row():
+                with gr.Column():
+                    seq_chunk_slider = gr.Slider(
+                        minimum=4, maximum=24, value=12, step=1,
+                        label="Parallélisme (seq_chunk)",
+                        info="Plus élevé = plus rapide mais consomme plus de RAM. Sur Apple Silicon, 12–16 est optimal.",
+                    )
+
+                with gr.Column():
+                    output_format_radio = gr.Radio(
+                        list(OUTPUT_FORMAT_MAP.keys()),
+                        value="🎬 Vidéo (MP4)",
+                        label="Format de sortie",
+                    )
+
+            with gr.Row():
+                with gr.Column():
+                    outputs_check = gr.CheckboxGroup(
+                        list(OUTPUT_NAMES.keys()),
+                        value=["✅ Composition finale"],
+                        label="Sorties à générer",
+                    )
+
+                with gr.Column():
+                    bg_radio = gr.Radio(
+                        list(BG_COLORS_UI.keys()),
+                        value="Noir",
+                        label="Fond de prévisualisation",
+                    )
+
+            with gr.Row():
+                output_dir_box = gr.Textbox(
+                    label="Dossier de sortie",
+                    placeholder="Laisser vide = Bureau + nom_vidéo_RVM_output",
+                    scale=4,
+                )
+
+        # ── Section 4 : Lancement ────────────────────────────────────────
+
+        with gr.Group(elem_classes=["card"]):
+            gr.Markdown("## 4 · Lancement", elem_classes=["section-title"])
+
+            with gr.Row():
+                launch_btn = gr.Button(
+                    "🎬 Lancer le détourage",
+                    variant="primary",
+                    scale=3,
+                    elem_classes=["btn-primary"],
+                )
+                cancel_btn = gr.Button(
+                    "⛔ Annuler",
+                    variant="stop",
+                    scale=1,
+                    elem_classes=["btn-danger"],
+                )
+
+            progress_bar = gr.Progress()
+            progress_md  = gr.Markdown("")
+            log_box      = gr.Textbox(
+                label="Journal",
+                lines=6,
+                max_lines=12,
+                interactive=False,
+                elem_classes=["log-box"],
+            )
+            result_md    = gr.Markdown("")
+
+            with gr.Row(visible=False) as finder_row:
+                finder_btn = gr.Button("📂 Ouvrir dans le Finder", variant="secondary")
+
+        # ── Section 5 : Prévisualisation ──────────────────────────────────
+
+        with gr.Group(elem_classes=["card"]):
+            gr.Markdown("## 5 · Prévisualisation", elem_classes=["section-title"])
+            gr.Markdown("*Naviguez entre 4 moments clés de votre vidéo (10%, 25%, 50%, 75%)*")
+
+            with gr.Row():
+                prev_btn = gr.Button("◀", scale=0, min_width=50)
+                with gr.Column(scale=2):
+                    frame_label = gr.Markdown("**Frame 1/4** — 10%")
+                next_btn = gr.Button("▶", scale=0, min_width=50)
+
+            with gr.Row():
+                source_img = gr.Image(label="Source", height=280, show_label=True)
+                result_img = gr.Image(label="Résultat", height=280, show_label=True)
+
+            preview_hint = gr.Markdown(
+                "*Lancez le détourage pour voir le résultat côte à côte.*",
+                visible=True,
+            )
+
+        # ──────────────────────────────────────────────────────────────────
+        # Event handlers
+        # ──────────────────────────────────────────────────────────────────
+
+        # ── Video import ──
+        def on_video_upload(filepath):
+            if not filepath:
+                return (
+                    "",
+                    gr.update(visible=False),
+                    {},
+                    [None]*4,
+                )
+            info = get_video_info(Path(filepath))
+            meta_text = format_video_info_md(info)
+            thumb = info.get("thumbnail")
+            src_frames = _source_frames(filepath)
+            # Suggest output dir on Desktop
+            suggested_out = str(Path.home() / "Desktop" / (Path(filepath).stem + "_RVM_output"))
+            return (
+                meta_text,
+                gr.update(value=thumb, visible=thumb is not None),
+                info,
+                src_frames,
+            )
+
+        video_input.change(
+            fn=on_video_upload,
+            inputs=[video_input],
+            outputs=[video_meta_md, video_thumb, video_info_state, src_frames_state],
+        )
+
+        # Update output dir suggestion when video changes
+        def suggest_output_dir(filepath):
+            if not filepath:
+                return ""
+            return str(Path.home() / "Desktop" / (Path(filepath).stem + "_RVM_output"))
+
+        video_input.change(
+            fn=suggest_output_dir,
+            inputs=[video_input],
+            outputs=[output_dir_box],
+        )
+
+        # ── Resolution manual field ──
+        def on_resolution_change(val):
+            return gr.update(visible=(val == "Manuel"))
+
+        resolution_radio.change(
+            fn=on_resolution_change,
+            inputs=[resolution_radio],
+            outputs=[manual_ds],
+        )
+
+        # ── Download weights ──
+        def on_download_weights(backbone_choice, progress=gr.Progress()):
+            backbone = "mobilenetv3" if "Mobile" in backbone_choice else "resnet50"
+            try:
+                def cb(frac, msg):
+                    progress(frac, desc=msg)
+                download_weights(backbone, progress_cb=cb)
+                return (
+                    _weights_status_text(),
+                    gr.update(visible=_any_weights_missing()),
+                    gr.update(visible=_any_weights_missing()),
+                    f"✅ Poids téléchargés : `models/rvm_{backbone}.pth`",
+                )
+            except Exception as e:
+                return (
+                    _weights_status_text(),
+                    gr.update(visible=True),
+                    gr.update(visible=True),
+                    f"❌ Erreur de téléchargement : {e}",
+                )
+
+        dl_btn.click(
+            fn=on_download_weights,
+            inputs=[dl_backbone],
+            outputs=[weights_status_md, dl_btn, dl_backbone, dl_status],
+        )
+
+        # ── Launch inference ──
+        def on_launch(
+            video_path,
+            backbone_label,
+            resolution_label,
+            manual_ratio,
+            seq_chunk,
+            format_label,
+            selected_outputs,
+            bg_name,
+            output_dir_str,
+            progress=gr.Progress(),
+        ):
+            global _cancel_event, _current_output_dir
+
+            if not video_path or not Path(video_path).exists():
+                yield (
+                    "❌ Format non reconnu. Formats acceptés : MP4, MOV, MKV, AVI.",
+                    "",
+                    gr.update(visible=False),
+                    [None]*4,
+                    gr.update(), gr.update(),
+                )
+                return
+
+            if not selected_outputs:
+                yield (
+                    "❌ Sélectionnez au moins une sortie (Composition, Alpha ou Foreground).",
+                    "",
+                    gr.update(visible=False),
+                    [None]*4,
+                    gr.update(), gr.update(),
+                )
+                return
+
+            backbone = BACKBONE_MAP.get(backbone_label, "mobilenetv3")
+            weights  = find_model_weights(backbone)
+            if weights is None:
+                yield (
+                    "❌ Modèle introuvable. Cliquez sur 'Télécharger les poids' ci-dessus.",
+                    "",
+                    gr.update(visible=False),
+                    [None]*4,
+                    gr.update(), gr.update(),
+                )
+                return
+
+            # Resolve downsample
+            ds_val = RESOLUTION_MAP.get(resolution_label)
+            if ds_val == "manual":
+                ds_val = float(manual_ratio)
+
+            # Output dir
+            if output_dir_str and output_dir_str.strip():
+                out_dir = Path(output_dir_str.strip())
+            else:
+                out_dir = Path.home() / "Desktop" / (Path(video_path).stem + "_RVM_output")
+            _current_output_dir = out_dir
+
+            # Outputs list
+            outputs_list = [OUTPUT_NAMES[k] for k in selected_outputs if k in OUTPUT_NAMES]
+            fmt = OUTPUT_FORMAT_MAP.get(format_label, "video")
+            bg  = BG_MAP.get(bg_name, "black")
+            device_str, _ = detect_device()
+
+            # Reset cancel
+            _cancel_event.clear()
+            cancel = _cancel_event
+
+            log_lines = []
+            result_holder = {}
+            error_holder  = {}
+
+            def run():
+                try:
+                    from rvm_inference import RVMInference
+                    inf = RVMInference(backbone=backbone, device=device_str)
+
+                    def pb(frac, msg):
+                        _progress_queue.put(("progress", frac, msg))
+
+                    result = inf.process_video(
+                        input_path   = Path(video_path),
+                        output_dir   = out_dir,
+                        downsample   = ds_val,
+                        seq_chunk    = int(seq_chunk),
+                        output_type  = fmt,
+                        outputs      = outputs_list,
+                        bg           = bg,
+                        cancel_event = cancel,
+                        progress_cb  = pb,
+                    )
+                    result_holder.update(result)
+                except Exception as e:
+                    error_holder["err"] = str(e)
+                finally:
+                    _progress_queue.put(("done", None, None))
+
+            thread = threading.Thread(target=run, daemon=True)
+            thread.start()
+
+            # Poll the queue and yield updates
+            while True:
+                try:
+                    item = _progress_queue.get(timeout=0.3)
+                except queue.Empty:
+                    if not thread.is_alive():
+                        break
+                    yield (
+                        "\n".join(log_lines[-20:]) if log_lines else "Démarrage…",
+                        "",
+                        gr.update(visible=False),
+                        [None]*4,
+                        gr.update(), gr.update(),
+                    )
+                    continue
+
+                kind, frac, msg = item
+                if kind == "progress":
+                    log_lines.append(msg)
+                    progress(frac, desc=msg)
+                    yield (
+                        "\n".join(log_lines[-20:]),
+                        f"**En cours…** {msg}",
+                        gr.update(visible=False),
+                        [None]*4,
+                        gr.update(), gr.update(),
+                    )
+                elif kind == "done":
+                    break
+
+            thread.join(timeout=5)
+
+            if "err" in error_holder:
+                err = error_holder["err"]
+                if "mémoire" in err.lower() or "memory" in err.lower():
+                    msg = "⚠️ Mémoire insuffisante. Essayez de réduire le seq_chunk ou de passer au modèle Rapide."
+                else:
+                    msg = f"❌ Erreur : {err}"
+                yield (msg, msg, gr.update(visible=False), [None]*4, gr.update(), gr.update())
+                return
+
+            if cancel.is_set():
+                msg = "🛑 Traitement annulé. Les frames déjà traitées sont disponibles dans le dossier de sortie."
+                yield (msg, msg, gr.update(visible=False), [None]*4, gr.update(), gr.update())
+                return
+
+            # Build summary
+            elapsed = result_holder.get("elapsed_s", 0)
+            avg_fps = result_holder.get("avg_fps", 0)
+            files   = result_holder.get("files", [])
+            mins, secs = divmod(int(elapsed), 60)
+            t_str = f"{mins}m {secs:02d}s" if mins else f"{secs}s"
+            file_lines = "\n".join(f"  • `{p}` {sz}" for p, sz in files)
+            summary = (
+                f"✅ **Terminé en {t_str}** — {avg_fps:.1f} FPS moyen\n\n"
+                f"**Fichiers générés :**\n{file_lines}"
+            )
+
+            # macOS notification
+            notify_macos("RVM — Terminé", f"Traitement terminé en {t_str}")
+
+            # Load result preview frames + source frames for side-by-side display
+            stem = Path(video_path).stem
+            res_frames  = _load_result_frames(out_dir, stem, bg_name)
+            src_frames  = _source_frames(video_path)
+            src_frame_0 = src_frames[0] if src_frames else None
+            res_frame_0 = res_frames[0] if res_frames else None
+
+            yield (
+                "\n".join(log_lines[-20:]),
+                summary,
+                gr.update(visible=True),
+                res_frames,
+                src_frame_0,
+                res_frame_0,
+            )
+
+        launch_btn.click(
+            fn=on_launch,
+            inputs=[
+                video_input,
+                backbone_radio,
+                resolution_radio,
+                manual_ds,
+                seq_chunk_slider,
+                output_format_radio,
+                outputs_check,
+                bg_radio,
+                output_dir_box,
+            ],
+            outputs=[log_box, result_md, finder_row, result_frames_state, source_img, result_img],
+        )
+
+        # ── Cancel ──
+        def on_cancel():
+            _cancel_event.set()
+            return "🛑 Annulation demandée…"
+
+        cancel_btn.click(fn=on_cancel, outputs=[progress_md])
+
+        # ── Open in Finder ──
+        def on_open_finder():
+            if _current_output_dir and _current_output_dir.exists():
+                open_in_finder(_current_output_dir)
+
+        finder_btn.click(fn=on_open_finder)
+
+        # ── Preview navigation ──
+        POSITIONS = ["10%", "25%", "50%", "75%"]
+
+        def show_frame(idx, src_frames, res_frames):
+            idx = int(idx) % 4
+            src = src_frames[idx] if src_frames and idx < len(src_frames) else None
+            res = res_frames[idx] if res_frames and idx < len(res_frames) else None
+            label = f"**Frame {idx+1}/4** — {POSITIONS[idx]}"
+            return idx, label, src, res
+
+        def on_prev(idx, src_frames, res_frames):
+            new_idx = (int(idx) - 1) % 4
+            return show_frame(new_idx, src_frames, res_frames)
+
+        def on_next(idx, src_frames, res_frames):
+            new_idx = (int(idx) + 1) % 4
+            return show_frame(new_idx, src_frames, res_frames)
+
+        prev_btn.click(
+            fn=on_prev,
+            inputs=[preview_idx_state, src_frames_state, result_frames_state],
+            outputs=[preview_idx_state, frame_label, source_img, result_img],
+        )
+        next_btn.click(
+            fn=on_next,
+            inputs=[preview_idx_state, src_frames_state, result_frames_state],
+            outputs=[preview_idx_state, frame_label, source_img, result_img],
+        )
+
+        # Show first source frame immediately after upload
+        def refresh_preview(src_frames):
+            if src_frames and src_frames[0] is not None:
+                return 0, "**Frame 1/4** — 10%", src_frames[0], None
+            return 0, "**Frame 1/4** — 10%", None, None
+
+        src_frames_state.change(
+            fn=refresh_preview,
+            inputs=[src_frames_state],
+            outputs=[preview_idx_state, frame_label, source_img, result_img],
+        )
+
+        # When results arrive, refresh preview at current index
+        def refresh_result_preview(idx, src_frames, res_frames):
+            return show_frame(idx, src_frames, res_frames)
+
+        result_frames_state.change(
+            fn=refresh_result_preview,
+            inputs=[preview_idx_state, src_frames_state, result_frames_state],
+            outputs=[preview_idx_state, frame_label, source_img, result_img],
+        )
+
+    return demo
+
+
+# ---------------------------------------------------------------------------
+# Status helpers
+# ---------------------------------------------------------------------------
+
+def _weights_status_text() -> str:
+    lines = []
+    for bb in ("mobilenetv3", "resnet50"):
+        w = find_model_weights(bb)
+        icon = "✅" if w else "❌"
+        name = "MobileNetV3" if bb == "mobilenetv3" else "ResNet50"
+        lines.append(f"{icon} {name}")
+    return " · ".join(lines)
+
+
+def _any_weights_missing() -> bool:
+    return any(find_model_weights(bb) is None for bb in ("mobilenetv3", "resnet50"))
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    demo = build_interface()
+    demo.launch(
+        server_name="127.0.0.1",
+        server_port=7860,
+        inbrowser=True,
+        share=False,
+        show_api=False,
+    )

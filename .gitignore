@@ -1,0 +1,8 @@
+models/*.pth
+models/*.pt
+__pycache__/
+*.pyc
+.DS_Store
+*_RVM_output/
+/tmp/
+*.log
