@@ -205,7 +205,7 @@ class _AlphaPngWriter:
 # ---------------------------------------------------------------------------
 
 def auto_downsample_ratio(h: int, w: int) -> float:
-    return min(512 / max(h, w), 1.0)
+    return min(768 / max(h, w), 1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -239,6 +239,7 @@ class RVMInference:
         bg:           str,                 # 'black'|'white'|'green'|'checker'
         cancel_event: threading.Event,
         progress_cb:  Optional[Callable],  # (fraction, message) -> None
+        alpha_gamma:  float = 1.0,        # >1 = bords plus nets, <1 = plus doux
     ) -> dict:
         """
         Run RVM on input_path, write results to output_dir.
@@ -323,6 +324,11 @@ class RVMInference:
 
                     # Detach rec to cut the autograd graph — prevents MPS memory accumulation
                     rec = [t.detach() if isinstance(t, torch.Tensor) else t for t in rec]
+
+                    # Alpha edge sharpness (gamma correction): >1 pushes semi-transparent
+                    # pixels toward 0, reducing fringe/halo around subject edges.
+                    if alpha_gamma != 1.0:
+                        pha = pha.pow(alpha_gamma)
 
                     # Composite background.
                     com = None

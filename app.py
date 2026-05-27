@@ -197,8 +197,8 @@ BACKBONE_MAP = {
 
 RESOLUTION_MAP = {
     "Auto (recommandé)": None,
-    "HD — 0.25": 0.25,
-    "4K — 0.125": 0.125,
+    "Qualité max — 0.5": 0.5,
+    "Rapide — 0.25": 0.25,
     "Manuel": "manual",
 }
 
@@ -362,7 +362,7 @@ def build_interface():
                         list(RESOLUTION_MAP.keys()),
                         value="Auto (recommandé)",
                         label="Résolution de traitement",
-                        info="Auto s'adapte à la source. HD=0.25 pour 1080p, 4K=0.125 pour 4K.",
+                        info="Auto cible 768px internes (meilleure qualité par défaut). Qualité max=0.5 pour des bords encore plus fins (plus lent).",
                     )
                     manual_ds = gr.Number(
                         value=0.25,
@@ -381,6 +381,14 @@ def build_interface():
                         info="Plus élevé = plus rapide mais consomme plus de RAM. Sur Apple Silicon, 12–16 est optimal.",
                     )
 
+                with gr.Column():
+                    alpha_sharpness_slider = gr.Slider(
+                        minimum=0.5, maximum=3.0, value=1.0, step=0.1,
+                        label="Netteté des bords (gamma alpha)",
+                        info="1.0 = neutre. >1 = contours plus tranchés, moins de halo. <1 = bords plus doux/flous.",
+                    )
+
+            with gr.Row():
                 with gr.Column():
                     output_format_radio = gr.Radio(
                         list(OUTPUT_FORMAT_MAP.keys()),
@@ -552,6 +560,7 @@ def build_interface():
             resolution_label,
             manual_ratio,
             seq_chunk,
+            alpha_gamma,
             format_label,
             selected_outputs,
             bg_name,
@@ -636,6 +645,7 @@ def build_interface():
                         bg           = bg,
                         cancel_event = cancel,
                         progress_cb  = pb,
+                        alpha_gamma  = float(alpha_gamma),
                     )
                     result_holder.update(result)
                 except Exception as e:
@@ -681,7 +691,7 @@ def build_interface():
             if "err" in error_holder:
                 err = error_holder["err"]
                 if "mémoire" in err.lower() or "memory" in err.lower():
-                    msg = "⚠️ Mémoire insuffisante. Essayez de réduire le seq_chunk ou de passer au modèle Rapide."
+                    msg = "⚠️ Mémoire insuffisante. Essayez : réduire le seq_chunk, passer au modèle Rapide, ou choisir la résolution Rapide — 0.25."
                 else:
                     msg = f"❌ Erreur : {err}"
                 yield (msg, msg, gr.update(visible=False), [None]*4, gr.update(), gr.update())
@@ -731,6 +741,7 @@ def build_interface():
                 resolution_radio,
                 manual_ds,
                 seq_chunk_slider,
+                alpha_sharpness_slider,
                 output_format_radio,
                 outputs_check,
                 bg_radio,
