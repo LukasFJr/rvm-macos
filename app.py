@@ -48,111 +48,278 @@ from utils import (
 # ---------------------------------------------------------------------------
 
 CUSTOM_CSS = """
-/* ── Base font ────────────────────────────────────────────── */
-* {
-  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display',
-               'SF Pro Text', 'Helvetica Neue', sans-serif !important;
-}
-
-/* ── Light theme variables ────────────────────────────────── */
+/* ───────────────────────── Design tokens ───────────────────────── */
 :root {
-  --bg-primary:    #f5f5f7;
-  --bg-secondary:  #ffffff;
-  --bg-card:       #eeeeee;
-  --text-primary:  #1d1d1f;
-  --text-secondary:#6e6e73;
+  --bg:            #f0f0f2;
+  --surface:       #ffffff;
+  --surface-2:     #f6f6f8;
+  --inset:         #ececf0;
+  --text:          #1d1d1f;
+  --text-2:        #6e6e73;
+  --text-3:        #8e8e93;
   --accent:        #0071e3;
   --accent-hover:  #0077ed;
-  --border:        #d2d2d7;
-  --success:       #34c759;
-  --warning:       #ff9f0a;
-  --error:         #ff3b30;
-  --radius:        12px;
+  --accent-soft:   rgba(0,113,227,0.10);
+  --on-accent:     #ffffff;
+  --success:       #1aa54a;
+  --warning:       #c77700;
+  --error:         #e0352b;
+  --border:        rgba(0,0,0,0.10);
+  --border-strong: rgba(0,0,0,0.16);
+  --ring:          rgba(0,113,227,0.35);
+  --shadow:        0 1px 2px rgba(0,0,0,0.04), 0 4px 16px rgba(0,0,0,0.05);
+  --radius:        14px;
+  --radius-sm:     9px;
+  --radius-xs:     7px;
+  --r-track:       #d9d9de;
 }
 
-/* ── Dark theme variables ─────────────────────────────────── */
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg-primary:    #1c1c1e;
-    --bg-secondary:  #2c2c2e;
-    --bg-card:       #3a3a3c;
-    --text-primary:  #f5f5f7;
-    --text-secondary:#aeaeb2;
-    --accent:        #0a84ff;
-    --accent-hover:  #409cff;
-    --border:        #3a3a3c;
-    --success:       #30d158;
-    --warning:       #ffd60a;
-    --error:         #ff453a;
-  }
+/* Dark theme — Gradio toggles `.dark` on <body> from the system color scheme.
+   (We can't use `@media (prefers-color-scheme: dark) { :root {...} }` because
+   Gradio's CSS scoper rewrites selectors nested in @media into
+   `... .contain :root`, which never matches the document root.) */
+.dark {
+  --bg:            #161618;
+  --surface:       #1f1f22;
+  --surface-2:     #29292d;
+  --inset:         #161618;
+  --text:          #f5f5f7;
+  --text-2:        #a1a1a8;
+  --text-3:        #79797f;
+  --accent:        #0a84ff;
+  --accent-hover:  #3b9dff;
+  --accent-soft:   rgba(10,132,255,0.16);
+  --on-accent:     #ffffff;
+  --success:       #30d158;
+  --warning:       #ffd60a;
+  --error:         #ff5247;
+  --border:        rgba(255,255,255,0.10);
+  --border-strong: rgba(255,255,255,0.16);
+  --ring:          rgba(10,132,255,0.45);
+  --shadow:        0 1px 2px rgba(0,0,0,0.3), 0 4px 16px rgba(0,0,0,0.35);
+  --r-track:       #46464b;
 }
 
-/* ── Global resets ────────────────────────────────────────── */
+/* ───────────────────────── Base ───────────────────────── */
+* {
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display',
+               'SF Pro Text', 'Helvetica Neue', Helvetica, Arial, sans-serif !important;
+}
+
+/* Make the whole viewport one uniform colour: the centered 900px container sits
+   on top of `gradio-app`, which Gradio paints white by default — without this it
+   shows as side-bands around the column. */
+body, gradio-app {
+  background: var(--bg) !important;
+}
 .gradio-container {
-  background: var(--bg-primary) !important;
-  color: var(--text-primary) !important;
-  max-width: 960px !important;
+  background: var(--bg) !important;
+  color: var(--text) !important;
+  max-width: 900px !important;
   margin: 0 auto !important;
+  padding: 48px 28px !important;
+  font-size: 15px !important;
+  line-height: 1.5 !important;
+  -webkit-font-smoothing: antialiased;
 }
+.gradio-container *,
+.gradio-container .prose,
+.gradio-container p,
+.gradio-container span,
+.gradio-container li { color: var(--text); }
 
-/* Cards */
+/* ───────────────────────── App header ───────────────────────── */
+/* The first markdown title ("# RVM — Détourage Vidéo") gets a gradient logo. */
+#app-title h1 {
+  display: flex !important; align-items: center; gap: 13px;
+  font-size: 27px !important; font-weight: 700 !important;
+  letter-spacing: -0.02em !important; margin: 0 0 4px !important;
+}
+#app-title h1::before {
+  content: ""; width: 38px; height: 38px; border-radius: 10px; flex: none;
+  display: inline-block;
+  background:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 4 L20 4 L20 16 L4 16 Z M2 20 L22 20 M9 9.5 L9 11 M15 9.5 L15 11 M9 13 Q12 15 15 13'/%3E%3C/svg%3E") center / 21px no-repeat,
+    linear-gradient(150deg, var(--accent), #8a5cff);
+  box-shadow: 0 3px 10px var(--accent-soft);
+}
+#app-subtitle p { color: var(--text-2) !important; font-size: 14px !important; margin: 0 0 30px !important; }
+
+/* ───────────────────────── Cards ───────────────────────── */
 .card {
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 16px 20px;
-  margin-bottom: 16px;
-}
-
-/* Section headings */
-.section-title {
-  font-size: 18px;
-  font-weight: 600;
-  color: var(--text-primary);
-  margin-bottom: 12px;
-}
-
-/* Status row */
-.status-ok   { color: var(--success); font-weight: 500; }
-.status-warn { color: var(--warning); font-weight: 500; }
-.status-err  { color: var(--error);   font-weight: 500; }
-
-/* Primary action button */
-.btn-primary button {
-  background: var(--accent) !important;
-  color: #fff !important;
-  border-radius: 8px !important;
-  font-size: 16px !important;
-  font-weight: 600 !important;
-  border: none !important;
-}
-.btn-primary button:hover {
-  background: var(--accent-hover) !important;
-}
-
-/* Danger / cancel button */
-.btn-danger button {
-  background: var(--error) !important;
-  color: #fff !important;
-  border-radius: 8px !important;
-  font-weight: 600 !important;
-  border: none !important;
-}
-
-/* Log textarea */
-.log-box textarea {
-  font-family: 'SF Mono', 'Menlo', monospace !important;
-  font-size: 12px !important;
-  background: var(--bg-card) !important;
-  color: var(--text-secondary) !important;
+  background: var(--surface) !important;
   border: 1px solid var(--border) !important;
-  border-radius: 8px !important;
+  border-radius: var(--radius) !important;
+  box-shadow: var(--shadow) !important;
+  padding: 22px 24px 24px !important;
+  margin-bottom: 18px !important;
+}
+/* Neutralise the default grey block backgrounds Gradio wraps around content,
+   so text/markdown sits flush on the white (or dark) card surface. */
+.card .styler,
+.card .form,
+.card > div > .block,
+.card fieldset.block {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
 }
 
-/* Labels */
-label span {
-  color: var(--text-primary) !important;
-  font-weight: 500 !important;
+/* ───────────────────────── Section headings ───────────────────────── */
+.section-title h2 {
+  font-size: 17px !important; font-weight: 650 !important;
+  letter-spacing: -0.01em !important; margin: 0 0 18px !important;
+  color: var(--text) !important;
+}
+
+/* ───────────────────────── Status glyphs ───────────────────────── */
+.status-ok   { color: var(--success); font-weight: 600; }
+.status-warn { color: var(--warning); font-weight: 600; }
+.status-err  { color: var(--text-2);  font-weight: 600; }
+
+/* ───────────────────────── Buttons ───────────────────────── */
+.gradio-container button {
+  border-radius: var(--radius-sm) !important;
+  font-weight: 600 !important;
+  font-size: 14px !important;
+  transition: background .15s, border-color .15s, opacity .15s;
+}
+
+/* NOTE: Gradio applies elem_classes directly on the <button>. Selectors below
+   target both that case and a possible nested <button> wrapper for robustness. */
+
+/* Primary action */
+.btn-primary, .btn-primary button {
+  background: var(--accent) !important;
+  color: var(--on-accent) !important;
+  border: 1px solid transparent !important;
+}
+.btn-primary:hover, .btn-primary button:hover { background: var(--accent-hover) !important; }
+
+/* Danger / cancel — outline style */
+.btn-danger, .btn-danger button {
+  background: transparent !important;
+  color: var(--error) !important;
+  border: 1px solid color-mix(in oklch, var(--error), transparent 60%) !important;
+}
+.btn-danger:hover, .btn-danger button:hover {
+  background: color-mix(in oklch, var(--error), transparent 90%) !important;
+}
+.btn-danger:disabled, .btn-danger button:disabled { opacity: 0.45 !important; cursor: not-allowed; }
+
+/* Secondary (download / finder) */
+.ico-download, .ico-download button, .ico-folder, .ico-folder button {
+  background: var(--surface-2) !important;
+  color: var(--text) !important;
+  border: 1px solid var(--border-strong) !important;
+}
+.ico-download:hover, .ico-download button:hover,
+.ico-folder:hover, .ico-folder button:hover { background: var(--inset) !important; }
+
+/* ───────────────────────── Button icons (CSS mask) ───────────────────────── */
+.ico-play::before, .ico-play button::before,
+.ico-stop::before, .ico-stop button::before,
+.ico-download::before, .ico-download button::before,
+.ico-folder::before, .ico-folder button::before,
+.ico-prev::before, .ico-prev button::before,
+.ico-next::before, .ico-next button::before {
+  content: ""; display: inline-block; width: 16px; height: 16px;
+  margin-right: 8px; vertical-align: -3px; flex: none;
+  background: currentColor;
+  -webkit-mask: var(--svg) center / contain no-repeat;
+          mask: var(--svg) center / contain no-repeat;
+}
+.ico-play::before, .ico-play button::before {
+  --svg: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='black'%3E%3Cpath d='M7 5v14l11-7z'/%3E%3C/svg%3E");
+}
+.ico-stop::before, .ico-stop button::before {
+  --svg: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='6' y='6' width='12' height='12' rx='2'/%3E%3C/svg%3E");
+}
+.ico-download::before, .ico-download button::before {
+  --svg: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 3v12m0 0l-4-4m4 4l4-4M5 21h14'/%3E%3C/svg%3E");
+}
+.ico-folder::before, .ico-folder button::before {
+  --svg: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z'/%3E%3C/svg%3E");
+}
+
+/* ───────────────────────── Preview nav buttons (round) ───────────────────────── */
+.nav-btn, .nav-btn button {
+  width: 38px !important; height: 38px !important; min-width: 38px !important;
+  border-radius: 50% !important; padding: 0 !important;
+  background: var(--surface-2) !important; color: var(--text) !important;
+  border: 1px solid var(--border-strong) !important;
+  display: grid !important; place-items: center !important;
+}
+.nav-btn:hover, .nav-btn button:hover { background: var(--inset) !important; }
+.ico-prev::before, .ico-prev button::before,
+.ico-next::before, .ico-next button::before { margin-right: 0; width: 16px; height: 16px; }
+.ico-prev::before, .ico-prev button::before {
+  --svg: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M15 5l-7 7 7 7'/%3E%3C/svg%3E");
+}
+.ico-next::before, .ico-next button::before {
+  --svg: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M9 5l7 7-7 7'/%3E%3C/svg%3E");
+}
+
+/* ───────────────────────── Inputs ───────────────────────── */
+.gradio-container input[type=text],
+.gradio-container input[type=number],
+.gradio-container textarea {
+  background: var(--surface-2) !important;
+  border: 1px solid var(--border-strong) !important;
+  border-radius: var(--radius-sm) !important;
+  color: var(--text) !important;
+}
+.gradio-container input[type=text]:focus,
+.gradio-container input[type=number]:focus,
+.gradio-container textarea:focus {
+  outline: none !important;
+  border-color: var(--accent) !important;
+  box-shadow: 0 0 0 3px var(--ring) !important;
+}
+.gradio-container input::placeholder,
+.gradio-container textarea::placeholder { color: var(--text-3) !important; }
+
+/* ───────────────────────── Sliders ───────────────────────── */
+.gradio-container input[type=range] {
+  -webkit-appearance: none; appearance: none; width: 100%; height: 6px;
+  background: var(--r-track) !important; border-radius: 999px; outline: none;
+}
+.gradio-container input[type=range]::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none; width: 20px; height: 20px; border-radius: 50%;
+  background: #fff; border: 0.5px solid rgba(0,0,0,0.12);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.3); cursor: pointer;
+}
+.gradio-container input[type=range]::-moz-range-thumb {
+  width: 20px; height: 20px; border-radius: 50%; background: #fff;
+  border: 0.5px solid rgba(0,0,0,0.12); box-shadow: 0 1px 3px rgba(0,0,0,0.3); cursor: pointer;
+}
+
+/* ───────────────────────── Radios / checkboxes ───────────────────────── */
+.gradio-container .wrap label,
+.gradio-container fieldset label {
+  background: var(--surface-2) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: var(--radius-sm) !important;
+}
+.gradio-container input[type=radio]:checked + span,
+.gradio-container input[type=checkbox]:checked + span { color: var(--accent) !important; }
+
+/* ───────────────────────── Log textarea ───────────────────────── */
+.log-box textarea {
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace !important;
+  font-size: 12px !important;
+  background: var(--inset) !important;
+  color: var(--text-2) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: var(--radius-sm) !important;
+}
+
+/* ───────────────────────── Labels ───────────────────────── */
+.gradio-container label > span,
+.gradio-container .gr-form > div > span {
+  color: var(--text) !important;
+  font-size: 13px !important;
+  font-weight: 600 !important;
 }
 """
 
@@ -191,8 +358,8 @@ BG_MAP = {
 }
 
 BACKBONE_MAP = {
-    "🚀 Rapide — MobileNetV3": "mobilenetv3",
-    "🎯 Qualité max — ResNet50": "resnet50",
+    "Rapide — MobileNetV3": "mobilenetv3",
+    "Qualité max — ResNet50": "resnet50",
 }
 
 RESOLUTION_MAP = {
@@ -203,13 +370,13 @@ RESOLUTION_MAP = {
 }
 
 OUTPUT_FORMAT_MAP = {
-    "🎬 Vidéo (MP4)": "video",
-    "🖼️ Séquence PNG": "png",
+    "Vidéo (MP4)": "video",
+    "Séquence PNG": "png",
     "Les deux": "both",
 }
 
 OUTPUT_NAMES = {
-    "✅ Composition finale": "composite",
+    "Composition finale":    "composite",
     "Alpha mask seul":       "alpha",
     "Foreground brut (RGB)": "foreground",
 }
@@ -305,8 +472,8 @@ def build_interface():
         result_frames_state = gr.State([None]*4)
         preview_idx_state  = gr.State(0)
 
-        gr.Markdown("# RVM — Détourage Vidéo", elem_classes=["section-title"])
-        gr.Markdown("*Interface locale pour Robust Video Matting — macOS uniquement*")
+        gr.Markdown("# RVM — Détourage Vidéo", elem_id="app-title")
+        gr.Markdown("*Interface locale pour Robust Video Matting — macOS uniquement*", elem_id="app-subtitle")
 
         # ── Section 1 : Environnement ────────────────────────────────────
 
@@ -324,9 +491,10 @@ def build_interface():
                         visible=_any_weights_missing(),
                     )
                     dl_btn = gr.Button(
-                        "⬇️ Télécharger les poids",
+                        "Télécharger les poids",
                         visible=_any_weights_missing(),
                         variant="secondary",
+                        elem_classes=["ico-download"],
                     )
             dl_progress = gr.Progress()
             dl_status   = gr.Markdown("")
@@ -352,7 +520,7 @@ def build_interface():
                 with gr.Column():
                     backbone_radio = gr.Radio(
                         list(BACKBONE_MAP.keys()),
-                        value="🚀 Rapide — MobileNetV3",
+                        value="Rapide — MobileNetV3",
                         label="Modèle",
                         info="MobileNetV3 : rapide, très bon pour la majorité des cas. ResNet50 : contours plus fins, plus lent.",
                     )
@@ -392,7 +560,7 @@ def build_interface():
                 with gr.Column():
                     output_format_radio = gr.Radio(
                         list(OUTPUT_FORMAT_MAP.keys()),
-                        value="🎬 Vidéo (MP4)",
+                        value="Vidéo (MP4)",
                         label="Format de sortie",
                     )
 
@@ -400,7 +568,7 @@ def build_interface():
                 with gr.Column():
                     outputs_check = gr.CheckboxGroup(
                         list(OUTPUT_NAMES.keys()),
-                        value=["✅ Composition finale"],
+                        value=["Composition finale"],
                         label="Sorties à générer",
                     )
 
@@ -425,16 +593,16 @@ def build_interface():
 
             with gr.Row():
                 launch_btn = gr.Button(
-                    "🎬 Lancer le détourage",
+                    "Lancer le détourage",
                     variant="primary",
                     scale=3,
-                    elem_classes=["btn-primary"],
+                    elem_classes=["btn-primary", "ico-play"],
                 )
                 cancel_btn = gr.Button(
-                    "⛔ Annuler",
+                    "Annuler",
                     variant="stop",
                     scale=1,
-                    elem_classes=["btn-danger"],
+                    elem_classes=["btn-danger", "ico-stop"],
                 )
 
             progress_bar = gr.Progress()
@@ -449,7 +617,7 @@ def build_interface():
             result_md    = gr.Markdown("")
 
             with gr.Row(visible=False) as finder_row:
-                finder_btn = gr.Button("📂 Ouvrir dans le Finder", variant="secondary")
+                finder_btn = gr.Button("Ouvrir dans le Finder", variant="secondary", elem_classes=["ico-folder"])
 
         # ── Section 5 : Prévisualisation ──────────────────────────────────
 
@@ -458,10 +626,10 @@ def build_interface():
             gr.Markdown("*Naviguez entre 4 moments clés de votre vidéo (10%, 25%, 50%, 75%)*")
 
             with gr.Row():
-                prev_btn = gr.Button("◀", scale=0, min_width=50)
+                prev_btn = gr.Button("", scale=0, min_width=50, elem_classes=["nav-btn", "ico-prev"])
                 with gr.Column(scale=2):
                     frame_label = gr.Markdown("**Frame 1/4** — 10%")
-                next_btn = gr.Button("▶", scale=0, min_width=50)
+                next_btn = gr.Button("", scale=0, min_width=50, elem_classes=["nav-btn", "ico-next"])
 
             with gr.Row():
                 source_img = gr.Image(label="Source", height=280, show_label=True)
@@ -826,7 +994,10 @@ def _weights_status_text() -> str:
     lines = []
     for bb in ("mobilenetv3", "resnet50"):
         w = find_model_weights(bb)
-        icon = "✅" if w else "❌"
+        if w:
+            icon = '<span class="status-ok">✓</span>'
+        else:
+            icon = '<span class="status-err">✕</span>'
         name = "MobileNetV3" if bb == "mobilenetv3" else "ResNet50"
         lines.append(f"{icon} {name}")
     return " · ".join(lines)
